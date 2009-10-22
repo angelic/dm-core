@@ -460,12 +460,7 @@ module DataMapper
     #
     # @api public
     def <<(resource)
-      if resource.kind_of?(Hash)
-        resource = new(resource)
-      end
-
-      resource_added(resource)
-      super
+      super(resource_added(resource))
     end
 
     # Appends the resources to self
@@ -477,8 +472,7 @@ module DataMapper
     #
     # @api public
     def concat(resources)
-      resources_added(resources)
-      super
+      super(resources_added(resources))
     end
 
     # Append one or more Resources to the Collection
@@ -493,8 +487,7 @@ module DataMapper
     #
     # @api public
     def push(*resources)
-      resources_added(resources)
-      super
+      super(*resources_added(resources))
     end
 
     # Prepend one or more Resources to the Collection
@@ -509,8 +502,7 @@ module DataMapper
     #
     # @api public
     def unshift(*resources)
-      resources_added(resources)
-      super
+      super(*resources_added(resources))
     end
 
     # Inserts the Resources before the Resource at the offset (which may be negative).
@@ -524,8 +516,7 @@ module DataMapper
     #
     # @api public
     def insert(offset, *resources)
-      resources_added(resources)
-      super
+      super(offset, *resources_added(resources))
     end
 
     # Removes and returns the last Resource in the Collection
@@ -619,6 +610,12 @@ module DataMapper
       super { |resource| yield(resource) && resource_removed(resource) }
     end
 
+    # Access LazyArray#replace directly
+    #
+    # @api private
+    alias superclass_replace replace
+    private :superclass_replace
+
     # Replace the Resources within the Collection
     #
     # @param [Enumerable] other
@@ -628,26 +625,23 @@ module DataMapper
     #
     # @api public
     def replace(other)
-      other = other.map do |resource|
-        if resource.kind_of?(Hash)
-          new(resource)
-        else
-          resource
-        end
-      end
-
-      if loaded?
-        resources_removed(self - other)
-      end
-
-      super(resources_added(other))
+      other = resources_added(other)
+      resources_removed(self - other)
+      super(other)
     end
 
-    # Access Collection#replace directly
+    # (Private) Set the Collection
+    #
+    # @param [Array] resources
+    #   resources to add to the collection
+    #
+    # @return [self]
     #
     # @api private
-    alias collection_replace replace
-    private :collection_replace
+    def set(resources)
+      superclass_replace(resources_added(resources))
+      self
+    end
 
     # Removes all Resources from the Collection
     #
@@ -836,21 +830,16 @@ module DataMapper
     #
     # @api public
     def destroy!
-      if query.limit || query.offset > 0 || query.links.any?
-        key        = model.key(repository.name)
-        conditions = Query.target_conditions(self, key, key)
-
-        unless model.all(:repository => repository, :conditions => conditions).destroy!
+      if loaded?
+        unless repository.delete(self) == size
           return false
         end
+
+        each { |resource| resource.reset }
+        clear
       else
         repository.delete(self)
         mark_loaded
-      end
-
-      if loaded?
-        each { |resource| resource.reset }
-        clear
       end
 
       true
@@ -884,11 +873,11 @@ module DataMapper
     # Checks if any resources have unsaved changes
     #
     # @return [Boolean]
-    #  true if a resource may be persisted
+    #  true if the resources have unsaved changed
     #
     # @api public
     def dirty?
-      loaded_entries.any? { |resource| resource.dirty? }
+      loaded_entries.any? { |resource| resource.dirty? } || @removed.any?
     end
 
     # Gets a Human-readable representation of this collection,
@@ -923,6 +912,10 @@ module DataMapper
       model.relationships(repository.name)
     end
 
+    def hash
+      query.hash
+    end
+
     private
 
     # Initializes a new Collection identified by the query
@@ -947,9 +940,7 @@ module DataMapper
       # TODO: change LazyArray to not use a load proc at all
       remove_instance_variable(:@load_with_proc)
 
-      if resources
-        replace(resources)
-      end
+      set(resources) if resources
     end
 
     # Copies the original Collection state
@@ -965,6 +956,19 @@ module DataMapper
       @query        = @query.dup
       @identity_map = @identity_map.dup
       @removed      = @removed.dup
+    end
+
+    # Initialize a resource from a Hash
+    #
+    # @param [Resource, Hash] resource
+    #   resource to process
+    #
+    # @return [Resource]
+    #   an initialized resource
+    #
+    # @api private
+    def initialize_resource(resource)
+      resource.kind_of?(Hash) ? new(resource) : resource
     end
 
     # Test if the collection is loaded between the offset and limit
@@ -1070,19 +1074,7 @@ module DataMapper
     #
     # @api private
     def _update(dirty_attributes)
-      if query.limit || query.offset > 0 || query.links.any?
-        attributes = dirty_attributes.map { |property, value| [ property.name, value ] }.to_hash
-
-        key        = model.key(repository.name)
-        conditions = Query.target_conditions(self, key, key)
-
-        unless model.all(:repository => repository, :conditions => conditions).update!(attributes)
-          return false
-        end
-      else
-        repository.update(dirty_attributes, self)
-      end
-
+      repository.update(dirty_attributes, self)
       true
     end
 
@@ -1098,7 +1090,7 @@ module DataMapper
     def _save(safe)
       loaded_entries.each { |resource| set_default_attributes(resource) }
       @removed.clear
-      loaded_entries.all? { |resource| resource.send(safe ? :save : :save!) }
+      loaded_entries.all? { |resource| resource.destroyed? || resource.__send__(safe ? :save : :save!) }
     end
 
     # Returns default values to initialize new Resources in the Collection
@@ -1145,7 +1137,7 @@ module DataMapper
     #
     # @api private
     def set_default_attributes(resource)
-      unless resource.frozen?
+      unless resource.readonly?
         resource.attributes = default_attributes
       end
     end
@@ -1165,7 +1157,7 @@ module DataMapper
     #
     # @api private
     def relate_resource(resource)
-      unless resource.frozen?
+      unless resource.readonly?
         resource.collection = self
       end
 
@@ -1187,7 +1179,7 @@ module DataMapper
     #
     # @api private
     def orphan_resource(resource)
-      if resource.collection.equal?(self) && !resource.frozen?
+      if resource.collection.equal?(self) && !resource.readonly?
         resource.collection = nil
       end
 
@@ -1204,6 +1196,8 @@ module DataMapper
     #
     # @api private
     def resource_added(resource)
+      resource = initialize_resource(resource)
+
       if resource.saved?
         @identity_map[resource.key] = resource
         @removed.delete(resource)
@@ -1225,7 +1219,7 @@ module DataMapper
     # @api private
     def resources_added(resources)
       if resources.kind_of?(Enumerable)
-        resources.each { |resource| resource_added(resource) }
+        resources.map { |resource| resource_added(resource) }
       else
         resource_added(resources)
       end
@@ -1280,6 +1274,7 @@ module DataMapper
     def filter(query)
       fields = self.query.fields.to_set
 
+      # TODO: push this into a Query#subset? method
       if query.links.empty?                                        &&
         (query.unique? || (!query.unique? && !self.query.unique?)) &&
         !query.reload?                                             &&

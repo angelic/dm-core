@@ -81,9 +81,10 @@ describe DataMapper::Query::Conditions do
     end
 
     {
-      :and => AndOperation,
-      :or  => OrOperation,
-      :not => NotOperation
+      :and  => AndOperation,
+      :or   => OrOperation,
+      :not  => NotOperation,
+      :null => NullOperation,
     }.each do |operand, klass|
       it "should initialize as #{klass} for the #{operand} operator" do
         op = Operation.new(operand)
@@ -93,12 +94,12 @@ describe DataMapper::Query::Conditions do
 
     it 'should set the remaining args in @operands' do
       op = Operation.new(:and, @comp1, @comp2)
-      op.operands.should == [@comp1, @comp2]
+      op.operands.should == [ @comp1, @comp2 ].to_set
     end
 
     it 'should have operands be empty of no operands are provided' do
       op = Operation.new(:and)
-      op.operands.should == []
+      op.operands.should == [].to_set
     end
 
     describe 'NotOperation' do

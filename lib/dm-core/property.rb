@@ -320,6 +320,7 @@ module DataMapper
       Time,
       Object,
       Class,
+      DataMapper::Types::Text,
     ].to_set.freeze
 
     # Possible :visibility option values
@@ -593,7 +594,7 @@ module DataMapper
     #
     # @api private
     def lazy_load(resource)
-      resource.send(:lazy_load, lazy_load_properties)
+      resource.__send__(:lazy_load, lazy_load_properties)
     end
 
     # TODO: document
@@ -805,9 +806,11 @@ module DataMapper
       @lazy         = @options.fetch(:lazy,         @type.respond_to?(:lazy) ? @type.lazy : false) && !@key
 
       # assign attributes per-type
-      if String == @primitive || Class == @primitive
+      if [ String, Class ].include?(@primitive)
         @length = @options.fetch(:length, DEFAULT_LENGTH)
-      elsif BigDecimal == @primitive || Float == @primitive
+      elsif DataMapper::Types::Text == @primitive
+        @length = @options.fetch(:length)
+      elsif [ BigDecimal, Float ].include?(@primitive)
         @precision = @options.fetch(:precision, DEFAULT_PRECISION)
         @scale     = @options.fetch(:scale,     Float == @primitive ? DEFAULT_SCALE_FLOAT : DEFAULT_SCALE_BIGDECIMAL)
 
@@ -1019,7 +1022,9 @@ module DataMapper
     #
     # @api private
     def typecast_to_datetime(value)
-      if value.respond_to?(:to_mash)
+      if value.respond_to?(:to_datetime)
+        value.to_datetime
+      elsif value.respond_to?(:to_mash)
         typecast_hash_to_datetime(value)
       else
         DateTime.parse(value.to_s)
@@ -1039,7 +1044,9 @@ module DataMapper
     #
     # @api private
     def typecast_to_date(value)
-      if value.respond_to?(:to_mash)
+      if value.respond_to?(:to_date)
+        value.to_date
+      elsif value.respond_to?(:to_mash)
         typecast_hash_to_date(value)
       else
         Date.parse(value.to_s)
@@ -1059,7 +1066,9 @@ module DataMapper
     #
     # @api private
     def typecast_to_time(value)
-      if value.respond_to?(:to_mash)
+      if value.respond_to?(:to_time)
+        value.to_time
+      elsif value.respond_to?(:to_mash)
         typecast_hash_to_time(value)
       else
         Time.parse(value.to_s)

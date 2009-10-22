@@ -1,10 +1,10 @@
-#!/usr/bin/env ruby -KU
+#!/usr/bin/env ruby -Ku
 
 require 'ftools'
 require 'rubygems'
 
-gem 'activerecord', '~>2.3.2'
-gem 'addressable',  '~>2.0'
+gem 'activerecord', '~>2.3.4'
+gem 'addressable',  '~>2.1'
 gem 'faker',        '~>0.3.1'
 gem 'rbench',       '~>0.2.3'
 
@@ -144,13 +144,13 @@ else
 
   if sqlfile
     answer = nil
-    until answer && answer[/^$|y|yes|n|no/]
+    until answer && answer[/\A(?:y(?:es)?|no?)\b/i]
       print('Would you like to dump data into tmp/performance.sql (for faster setup)? [Yn]');
       STDOUT.flush
       answer = gets
     end
 
-    if answer[/^$|y|yes/]
+    if %w[ y yes ].include?(answer.downcase)
       File.makedirs(File.dirname(sqlfile))
       #adapter.execute("SELECT * INTO OUTFILE '#{sqlfile}' FROM exhibits;")
       `#{mysqldump_bin} -u #{c[:username]} #{"-p#{c[:password]}" unless c[:password].blank?} #{c[:database]} exhibits users > #{sqlfile}`

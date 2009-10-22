@@ -312,7 +312,7 @@ module DataMapper
           # the intermediaries are removed
           lazy_load
 
-          unless intermediaries.destroy
+          unless intermediaries.all(via => self).destroy
             return false
           end
 
@@ -332,35 +332,35 @@ module DataMapper
         def destroy!
           assert_source_saved 'The source must be saved before mass-deleting the collection'
 
-          # make sure the records are loaded so they can be found when
-          # the intermediaries are removed
-          lazy_load
+          key        = model.key(repository_name)
+          conditions = Query.target_conditions(self, key, key)
 
-          unless intermediaries.destroy!
+          unless intermediaries.all(via => self).destroy!
             return false
           end
 
-          super
+          unless model.all(:repository => repository, :conditions => conditions).destroy!
+            return false
+          end
+
+          each { |resource| resource.reset }
+          clear
+
+          true
         end
 
-        # Return the intermediaries between the source and the targets
+        # Return the intermediaries linking the source to the targets
         #
         # @return [Collection]
         #   the intermediary collection
         #
         # @api public
         def intermediaries
-          return @intermediaries if @intermediaries
-
-          intermediaries = if through.loaded?(source)
+          @intermediaries ||= if through.loaded?(source)
             through.get!(source)
           else
-            through.set!(source, through.collection_for(source))
+            reset_intermediaries
           end
-
-          scoped = intermediaries.all(via => self)
-
-          @intermediaries = scoped.query == intermediaries.query ? intermediaries : scoped
         end
 
         private
@@ -370,7 +370,7 @@ module DataMapper
         def _create(safe, attributes)
           if via.respond_to?(:resource_for)
             resource = super
-            if create_intermediary(safe, via => resource)
+            if create_intermediary(safe, resource)
               resource
             end
           else
@@ -385,16 +385,15 @@ module DataMapper
         def _save(safe)
           if @removed.any?
             # delete only intermediaries linked to the removed targets
-            removed_intermediaries = intermediaries.all(via => @removed).each do |resource|
-              intermediaries.delete(resource)
-            end
+            return false unless intermediaries.all(via => @removed).send(safe ? :destroy : :destroy!)
 
-            return false unless removed_intermediaries.send(safe ? :destroy : :destroy!)
+            # reset the intermediaries so that it reflects the current state of the datastore
+            reset_intermediaries
           end
 
           if via.respond_to?(:resource_for)
             super
-            loaded_entries.all? { |resource| create_intermediary(safe, via => resource) }
+            loaded_entries.all? { |resource| create_intermediary(safe, resource) }
           else
             if intermediary = create_intermediary(safe)
               inverse = via.inverse
@@ -405,17 +404,39 @@ module DataMapper
           end
         end
 
+        # Map the resources in the collection to the intermediaries
+        #
+        # @return [Hash]
+        #   the map of resources to their intermediaries
+        #
+        # @api private
+        def intermediary_for
+          @intermediary_for ||= {}
+        end
+
         # TODO: document
         # @api private
-        def create_intermediary(safe, attributes = {})
-          collection = intermediaries
+        def create_intermediary(safe, resource = nil)
+          return intermediary_for[resource] if intermediary_for[resource]
 
-          return unless collection.send(safe ? :save : :save!)
+          method = safe ? :save : :save!
 
-          intermediary = collection.first(attributes) ||
-                         collection.send(safe ? :create : :create!, attributes)
+          return unless intermediaries.send(method)
 
-          return intermediary if intermediary.saved?
+          attributes = {}
+          attributes[via] = resource if resource
+
+          intermediary = intermediaries.first_or_new(attributes)
+          return unless intermediary.send(method)
+
+          # map the resource, even if it is nil, to the intermediary
+          intermediary_for[resource] = intermediary
+        end
+
+        # TODO: document
+        # @api private
+        def reset_intermediaries
+          through.set!(source, through.collection_for(source))
         end
 
         # TODO: document

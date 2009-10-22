@@ -579,31 +579,6 @@ describe DataMapper::Query do
           end
         end
 
-        describe 'with a Proc value' do
-          before :all do
-            @options[:conditions] = { :name => lambda { 'Dan Kubb' } }
-            @return = DataMapper::Query.new(@repository, @model, @options.freeze)
-          end
-
-          it { @return.should be_kind_of(DataMapper::Query) }
-
-          it 'should set the conditions' do
-            @return.conditions.should ==
-              DataMapper::Query::Conditions::Operation.new(
-                :and,
-                DataMapper::Query::Conditions::Comparison.new(
-                  :eql,
-                  @model.properties[:name],
-                  'Dan Kubb'
-                )
-              )
-          end
-
-          it 'should be valid' do
-            @return.should be_valid
-          end
-        end
-
         describe 'with an Array with 1 entry' do
           before :all do
             @options[:conditions] = { :name => [ 'Dan Kubb' ] }
@@ -1421,7 +1396,25 @@ describe DataMapper::Query do
   it { @query.should respond_to(:dup) }
 
   describe '#dup' do
-    it 'should be awesome'
+    before :all do
+      @new = @query.dup
+    end
+
+    it 'should return a Query' do
+      @new.should be_kind_of(DataMapper::Query)
+    end
+
+    it 'should not equal query' do
+      @new.should_not equal(@query)
+    end
+
+    it 'should eql query' do
+      @new.should eql(@query)
+    end
+
+    it 'should == query' do
+      @new.should == @query
+    end
   end
 
   it { @query.should respond_to(:eql?) }
@@ -1633,23 +1626,23 @@ describe DataMapper::Query do
   it { @query.should respond_to(:merge) }
 
   describe '#merge' do
-    describe "with a Hash" do
-      before(:each) do
+    describe 'with a Hash' do
+      before do
         @return = @query.merge({ :limit => 202 })
       end
 
-      it "does not affect the receiver" do
+      it 'does not affect the receiver' do
         @query.options[:limit].should == 3
       end
     end
 
-    describe "with a Query" do
-      before(:each) do
+    describe 'with a Query' do
+      before do
         @other  = DataMapper::Query.new(@repository, @model, @options.update(@other_options))
         @return = @query.merge(@other)
       end
 
-      it "does not affect the receiver" do
+      it 'does not affect the receiver' do
         @query.options[:limit].should == 3
       end
     end
@@ -1730,45 +1723,6 @@ describe DataMapper::Query do
 
         it 'should return a copy' do
           @return.should be_eql(@query)
-        end
-      end
-
-      describe 'using a different repository as a Repository' do
-        before :all do
-          @repository = DataMapper::Repository.new(:other)
-          @return = @query.relative(:repository => @repository)
-        end
-
-        it { @return.should be_kind_of(DataMapper::Query) }
-
-        it 'should not return self' do
-          @return.should_not equal(@original)
-        end
-
-        it 'should set the repository' do
-          @return.repository.should equal(@repository)
-        end
-      end
-
-      describe 'using a different repository as a Symbol' do
-        before :all do
-          @other_adapter = DataMapper.setup(:other, :adapter => :in_memory)
-
-          @return = @query.relative(:repository => :other)
-        end
-
-        after :all do
-          DataMapper::Repository.adapters.delete(@other_adapter.name)
-        end
-
-        it { @return.should be_kind_of(DataMapper::Query) }
-
-        it 'should not return self' do
-          @return.should_not equal(@original)
-        end
-
-        it 'should set the repository' do
-          @return.repository.should == DataMapper::Repository.new(:other)
         end
       end
 
@@ -2406,15 +2360,16 @@ describe DataMapper::Query do
       describe 'that has conditions set' do
         before :all do
           @and_operation = DataMapper::Query::Conditions::Operation.new(:and)
-          @or_operation = DataMapper::Query::Conditions::Operation.new(:or)
+          @or_operation  = DataMapper::Query::Conditions::Operation.new(:or)
 
-          @and_operation << DataMapper::Query::Conditions::Comparison.new(:eql,User.name,"Dan Kubb")
-          @and_operation << DataMapper::Query::Conditions::Comparison.new(:eql,User.citizenship,"Canada")
+          @and_operation << DataMapper::Query::Conditions::Comparison.new(:eql, User.name,       'Dan Kubb')
+          @and_operation << DataMapper::Query::Conditions::Comparison.new(:eql, User.citizenship,'Canada')
 
-          @or_operation << DataMapper::Query::Conditions::Comparison.new(:eql,User.name,"Ted Han")
-          @or_operation << DataMapper::Query::Conditions::Comparison.new(:eql,User.citizenship,"USA")
-          @query_one = DataMapper::Query.new(@repository, @model, {:conditions=>@and_operation})
-          @query_two = DataMapper::Query.new(@repository, @model, {:conditions=>@or_operation})
+          @or_operation << DataMapper::Query::Conditions::Comparison.new(:eql, User.name,        'Ted Han')
+          @or_operation << DataMapper::Query::Conditions::Comparison.new(:eql, User.citizenship, 'USA')
+
+          @query_one = DataMapper::Query.new(@repository, @model, :conditions => @and_operation)
+          @query_two = DataMapper::Query.new(@repository, @model, :conditions => @or_operation)
 
           @conditions = @query_one.merge(@query_two).conditions
         end
@@ -2612,13 +2567,33 @@ describe DataMapper::Query do
 
         it 'should update the conditions' do
           @return.conditions.should == DataMapper::Query::Conditions::Operation.new(
-                                          :and,
-                                          DataMapper::Query::Conditions::Comparison.new(:eql,
-                                                                                 @model.properties[:name],
-                                                                                 @options[:name]
-                                                                                )
+            :and,
+            DataMapper::Query::Conditions::Comparison.new(
+              :eql,
+              @model.properties[:name],
+              @options[:name]
+            )
           )
-          #@return.conditions.should == [ [ :eql, @model.properties[:name], @options[:name] ] ]
+        end
+      end
+
+      describe 'using raw conditions' do
+        before :all do
+          @query.update(:conditions => [ 'name IS NOT NULL' ])
+
+          @return = @query.update(:conditions => [ 'name = ?', 'Dan Kubb' ])
+        end
+
+        it { @return.should be_kind_of(DataMapper::Query) }
+
+        it { @return.should equal(@original) }
+
+        it 'should update the conditions' do
+          @return.conditions.should == DataMapper::Query::Conditions::Operation.new(
+            :and,
+            [ 'name IS NOT NULL' ],
+            [ 'name = ?', [ 'Dan Kubb' ] ]
+          )
         end
       end
     end

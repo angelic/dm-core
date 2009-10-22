@@ -125,11 +125,7 @@ module DataMapper
         #
         # @api private
         def eager_load_targets(source, targets, query)
-          # TODO: figure out an alternative approach to using a
-          # private method call collection_replace
-          association = collection_for(source, query)
-          association.send(:collection_replace, targets)
-          set!(source, association)
+          set!(source, collection_for(source, query).set(targets))
         end
 
         # Returns collection class used by this type of
@@ -278,7 +274,7 @@ module DataMapper
           assert_source_saved 'The source must be saved before saving the collection'
 
           # update removed resources to not reference the source
-          @removed.all? { |resource| resource.destroyed? || resource.send(safe ? :save : :save!) } && super
+          @removed.all? { |resource| resource.destroyed? || resource.__send__(safe ? :save : :save!) } && super
         end
 
         # TODO: document
@@ -301,7 +297,7 @@ module DataMapper
 
           # set the resources after the relationship and source are set
           if resources
-            collection.send(:collection_replace, resources)
+            collection.set(resources)
           end
 
           collection
@@ -310,6 +306,7 @@ module DataMapper
         # TODO: document
         # @api private
         def resource_added(resource)
+          resource = initialize_resource(resource)
           inverse_set(resource, source)
           super
         end
@@ -324,7 +321,7 @@ module DataMapper
         # TODO: document
         # @api private
         def inverse_set(source, target)
-          unless source.frozen?
+          unless source.readonly?
             relationship.inverse.set(source, target)
           end
         end

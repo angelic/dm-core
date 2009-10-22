@@ -260,17 +260,10 @@ module DataMapper
         #
         # @api semipublic
         def to_s
-          "#{@subject} #{comparator_string} #{@value}"
+          "#{@subject.name} #{comparator_string} #{@value}"
         end
 
-        private # ============================================================
-
-        # Holds the actual value of the given property or relationship
-        #
-        # @return [Object]
-        #
-        # @api semipublic
-        attr_reader :expected
+        private
 
         # Creates a new AbstractComparison instance with +subject+ and +value+
         #
@@ -285,15 +278,8 @@ module DataMapper
           @subject      = subject
           @loaded_value = typecast_value(value)
           @value        = dumped_value(@loaded_value)
-          @expected     = expected_value
-        end
 
-        # Used by Ruby when creating a copy of the comparison
-        #
-        # @api private
-        def initialize_copy(*)
-          @value = @value.dup
-          @loaded_value = @loaded_value.dup
+          freeze
         end
 
         # Typecasts the given +val+ using subject#typecast
@@ -422,20 +408,6 @@ module DataMapper
             expected_value
           end
         end
-
-        # Returns the name of this comparison
-        #
-        # @return [String]
-        #   The name of the comparison class minus the trailing "Comparison".
-        #
-        # @example
-        #   Comparison.new(:eql, ...).comparator_string
-        #   # => Equal
-        #
-        # @api private
-        def comparator_string
-          self.class.name.chomp('Comparison')
-        end
       end # class AbstractComparison
 
       # Included into comparisons which are capable of supporting
@@ -477,7 +449,7 @@ module DataMapper
         # @return [Boolean]
         # @api semipublic
         def matches?(record)
-          record_value(record) == expected
+          record_value(record) == expected_value
         end
 
         private
@@ -510,7 +482,7 @@ module DataMapper
         # @api semipublic
         def matches?(record)
           record_value = record_value(record)
-          !record_value.nil? && expected.include?(record_value)
+          !record_value.nil? && expected_value.include?(record_value)
         end
 
         # Checks that the Comparison is valid
@@ -522,10 +494,12 @@ module DataMapper
         # @api semipublic
         def valid?
           case value
-            when Array, Set
-              loaded_value.any? && loaded_value.all? { |val| subject.valid?(val) }
+            when Collection
+              true
             when Range
               loaded_value.any? && subject.valid?(loaded_value.first) && subject.valid?(loaded_value.last)
+            when Enumerable
+              loaded_value.any? && loaded_value.all? { |val| subject.valid?(val) }
             else
               false
           end
@@ -540,7 +514,7 @@ module DataMapper
         #
         # @api private
         def expected_value
-          if loaded_value.is_a?(Range)
+          if loaded_value.kind_of?(Range)
             Range.new(super(loaded_value.first), super(loaded_value.last), loaded_value.exclude_end?)
           else
             loaded_value.map { |val| super(val) }
@@ -555,7 +529,7 @@ module DataMapper
         #
         # @api private
         def typecast_value(val)
-          if subject.respond_to?(:typecast) && val.is_a?(Range)
+          if subject.respond_to?(:typecast) && val.kind_of?(Range)
             if subject.primitive?(val.first)
               # If the range type matches, nothing to do
               val
@@ -578,10 +552,12 @@ module DataMapper
         #
         # @api private
         def dumped_value(val)
-          if subject.respond_to?(:value) && val.is_a?(Range) && !subject.custom?
+          if subject.respond_to?(:value) && val.kind_of?(Range) && !subject.custom?
             val
           elsif subject.respond_to?(:value) && val.respond_to?(:map)
-            val.map { |el| subject.value(el) }
+            val = val.map { |el| subject.value(el) }
+            val.uniq!
+            val
           else
             val
           end
@@ -612,7 +588,7 @@ module DataMapper
         # @api semipublic
         def matches?(record)
           record_value = record_value(record)
-          !record_value.nil? && record_value =~ expected
+          !record_value.nil? && record_value =~ expected_value
         end
 
         # Checks that the Comparison is valid
@@ -662,7 +638,7 @@ module DataMapper
         # @api semipublic
         def matches?(record)
           record_value = record_value(record)
-          !record_value.nil? && record_value =~ expected
+          !record_value.nil? && record_value =~ expected_value
         end
 
         private
@@ -706,7 +682,7 @@ module DataMapper
         # @api semipublic
         def matches?(record)
           record_value = record_value(record)
-          !record_value.nil? && record_value > expected
+          !record_value.nil? && record_value > expected_value
         end
 
         private
@@ -736,7 +712,7 @@ module DataMapper
         # @api semipublic
         def matches?(record)
           record_value = record_value(record)
-          !record_value.nil? && record_value < expected
+          !record_value.nil? && record_value < expected_value
         end
 
         private
@@ -766,7 +742,7 @@ module DataMapper
         # @api semipublic
         def matches?(record)
           record_value = record_value(record)
-          !record_value.nil? && record_value >= expected
+          !record_value.nil? && record_value >= expected_value
         end
 
         private
@@ -794,7 +770,7 @@ module DataMapper
         # @api semipublic
         def matches?(record)
           record_value = record_value(record)
-          !record_value.nil? && record_value <= expected
+          !record_value.nil? && record_value <= expected_value
         end
 
         private

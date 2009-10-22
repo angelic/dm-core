@@ -475,7 +475,7 @@ module DataMapper
 
             model = discriminator && record[discriminator] || self
 
-            resource = if (key_values = record.values_at(*model.key(repository_name))).all? {|a| !a.nil?}
+            resource = if (key_values = record.values_at(*model.key(repository_name))).all? { |value| !value.nil? }
               identity_map = repository.identity_map(model)
               identity_map[key_values]
             end
@@ -499,7 +499,7 @@ module DataMapper
           when Resource
             model = record.model
 
-            resource = if (key_values = record.key).all? {|a| !a.nil?}
+            resource = if (key_values = record.key).all? { |value| !value.nil? }
               identity_map = repository.identity_map(model)
               identity_map[key_values]
             end
@@ -521,7 +521,7 @@ module DataMapper
           # record the state of the resource after loaded
           identity_map[key_values] = resource
         else
-          resource.freeze
+          resource.instance_variable_set(:@readonly, true)
         end
 
         resource
@@ -613,7 +613,7 @@ module DataMapper
     # @api private
     def _create(safe, attributes)
       resource = new(attributes)
-      resource.send(safe ? :save : :save!)
+      resource.__send__(safe ? :save : :save!)
       resource
     end
 

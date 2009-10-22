@@ -82,7 +82,7 @@ module DataMapper
           AND "table_name" = ?
         SQL
 
-        query(statement, schema_name, storage_name).first > 0
+        select(statement, schema_name, storage_name).first > 0
       end
 
       # Returns whether the field exists.
@@ -105,7 +105,7 @@ module DataMapper
           AND "column_name" = ?
         SQL
 
-        query(statement, schema_name, storage_name, column_name).first > 0
+        select(statement, schema_name, storage_name, column_name).first > 0
       end
 
       # TODO: document
@@ -243,7 +243,7 @@ module DataMapper
         def property_schema_hash(property)
           schema = (self.class.type_map[property.type] || self.class.type_map[property.primitive]).merge(:name => property.field)
 
-          if property.primitive == String && schema[:primitive] != 'TEXT' && schema[:primitive] != 'CLOB'
+          if property.primitive == String && schema[:primitive] != 'TEXT' && schema[:primitive] != 'CLOB' && schema[:primitive != 'NVARCHAR']
             schema[:length] = property.length
           elsif property.primitive == BigDecimal || property.primitive == Float
             schema[:precision] = property.precision
@@ -276,7 +276,11 @@ module DataMapper
           if schema[:precision] && schema[:scale]
             statement << "(#{[ :precision, :scale ].map { |key| connection.quote_value(schema[key]) }.join(', ')})"
           elsif schema[:length]
-            statement << "(#{connection.quote_value(schema[:length])})"
+            unless schema[:length] == 'max'
+              statement << "(#{connection.quote_value(schema[:length])})"
+            else
+              statement << "(max)"
+            end
           end
 
           statement << " DEFAULT #{connection.quote_value(schema[:default])}" if schema.key?(:default)
@@ -299,17 +303,16 @@ module DataMapper
           scale     = Property::DEFAULT_SCALE_BIGDECIMAL
 
           @type_map ||= {
-            Integer       => { :primitive => 'INTEGER'                                           },
-            String        => { :primitive => 'VARCHAR', :length => length                        },
-            Class         => { :primitive => 'VARCHAR', :length => length                        },
-            BigDecimal    => { :primitive => 'DECIMAL', :precision => precision, :scale => scale },
-            Float         => { :primitive => 'FLOAT',   :precision => precision                  },
-            DateTime      => { :primitive => 'TIMESTAMP'                                         },
-            Date          => { :primitive => 'DATE'                                              },
-            Time          => { :primitive => 'TIMESTAMP'                                         },
-            TrueClass     => { :primitive => 'BOOLEAN'                                           },
-            Types::Object => { :primitive => 'TEXT'                                              },
-            Types::Text   => { :primitive => 'TEXT'                                              },
+            Integer     => { :primitive => 'INTEGER'                                           },
+            String      => { :primitive => 'VARCHAR', :length => length                        },
+            Class       => { :primitive => 'VARCHAR', :length => length                        },
+            BigDecimal  => { :primitive => 'DECIMAL', :precision => precision, :scale => scale },
+            Float       => { :primitive => 'FLOAT',   :precision => precision                  },
+            DateTime    => { :primitive => 'TIMESTAMP'                                         },
+            Date        => { :primitive => 'DATE'                                              },
+            Time        => { :primitive => 'TIMESTAMP'                                         },
+            TrueClass   => { :primitive => 'BOOLEAN'                                           },
+            Types::Text => { :primitive => 'TEXT'                                              },
           }.freeze
         end
       end # module ClassMethods
@@ -329,13 +332,13 @@ module DataMapper
       # TODO: document
       # @api semipublic
       def storage_exists?(storage_name)
-        query('SHOW TABLES LIKE ?', storage_name).first == storage_name
+        select('SHOW TABLES LIKE ?', storage_name).first == storage_name
       end
 
       # TODO: document
       # @api semipublic
       def field_exists?(storage_name, field)
-        result = query("SHOW COLUMNS FROM #{quote_name(storage_name)} LIKE ?", field).first
+        result = select("SHOW COLUMNS FROM #{quote_name(storage_name)} LIKE ?", field).first
         result ? result.field == field : false
       end
 
@@ -414,7 +417,7 @@ module DataMapper
         # TODO: document
         # @api private
         def show_variable(name)
-          result = query('SHOW VARIABLES LIKE ?', name).first
+          result = select('SHOW VARIABLES LIKE ?', name).first
           result ? result.value.freeze : nil
         end
 
@@ -614,13 +617,13 @@ module DataMapper
         # TODO: document
         # @api private
         def schema_name
-          @schema_name ||= query('SELECT current_schema()').first.freeze
+          @schema_name ||= select('SELECT current_schema()').first.freeze
         end
 
         # TODO: document
         # @api private
         def postgres_version
-          @postgres_version ||= query('SELECT version()').first.split[1].freeze
+          @postgres_version ||= select('SELECT version()').first.split[1].freeze
         end
 
         # TODO: document
@@ -713,8 +716,8 @@ module DataMapper
           scale     = Property::DEFAULT_SCALE_BIGDECIMAL
 
           @type_map ||= super.merge(
-            BigDecimal => { :primitive => 'NUMERIC', :precision => precision, :scale => scale },
-            Float      => { :primitive => 'DOUBLE PRECISION'                                  }
+            BigDecimal => { :primitive => 'NUMERIC',          :precision => precision, :scale => scale },
+            Float      => { :primitive => 'DOUBLE PRECISION'                                           }
           ).freeze
         end
       end # module ClassMethods
@@ -730,13 +733,13 @@ module DataMapper
       # TODO: document
       # @api semipublic
       def storage_exists?(storage_name)
-        query_table(storage_name).size > 0
+        table_info(storage_name).any?
       end
 
       # TODO: document
       # @api semipublic
       def field_exists?(storage_name, column_name)
-        query_table(storage_name).any? do |row|
+        table_info(storage_name).any? do |row|
           row.name == column_name
         end
       end
@@ -758,8 +761,8 @@ module DataMapper
 
         # TODO: document
         # @api private
-        def query_table(table_name)
-          query("PRAGMA table_info(#{quote_name(table_name)})")
+        def table_info(table_name)
+          select("PRAGMA table_info(#{quote_name(table_name)})")
         end
 
         # TODO: document
@@ -796,7 +799,7 @@ module DataMapper
         # TODO: document
         # @api private
         def sqlite_version
-          @sqlite_version ||= query('SELECT sqlite_version(*)').first.freeze
+          @sqlite_version ||= select('SELECT sqlite_version(*)').first.freeze
         end
       end # module SQL
 
@@ -831,7 +834,7 @@ module DataMapper
           AND table_name = ?
         SQL
 
-        query(statement, schema_name, oracle_upcase(storage_name)).first > 0
+        select(statement, schema_name, oracle_upcase(storage_name)).first > 0
       end
 
       # TODO: document
@@ -845,7 +848,7 @@ module DataMapper
           AND sequence_name = ?
         SQL
 
-        query(statement, schema_name, oracle_upcase(sequence_name)).first > 0
+        select(statement, schema_name, oracle_upcase(sequence_name)).first > 0
       end
 
       # TODO: document
@@ -859,7 +862,7 @@ module DataMapper
           AND column_name = ?
         SQL
 
-        query(statement, schema_name, oracle_upcase(storage_name), oracle_upcase(field_name)).first > 0
+        select(statement, schema_name, oracle_upcase(storage_name), oracle_upcase(field_name)).first > 0
       end
 
       # TODO: document
@@ -872,7 +875,7 @@ module DataMapper
           AND table_name = ?
         SQL
 
-        query(statement, schema_name, oracle_upcase(storage_name))
+        select(statement, schema_name, oracle_upcase(storage_name))
       end
 
       # TODO: document
@@ -975,7 +978,7 @@ module DataMapper
         # TODO: document
         # @api private
         def schema_name
-          @schema_name ||= query("SELECT SYS_CONTEXT('userenv','current_schema') FROM dual").first.freeze
+          @schema_name ||= select("SELECT SYS_CONTEXT('userenv','current_schema') FROM dual").first.freeze
         end
 
         # TODO: document
@@ -1036,6 +1039,7 @@ module DataMapper
           else
             nil
           end
+
         end
 
         # TODO: document
@@ -1089,17 +1093,16 @@ module DataMapper
           scale     = Property::DEFAULT_SCALE_BIGDECIMAL
 
           @type_map ||= {
-            Integer       => { :primitive => 'NUMBER',   :precision => precision, :scale => 0   },
-            String        => { :primitive => 'VARCHAR2', :length => length                      },
-            Class         => { :primitive => 'VARCHAR2', :length => length                      },
-            BigDecimal    => { :primitive => 'NUMBER',   :precision => precision, :scale => nil },
-            Float         => { :primitive => 'BINARY_FLOAT',                                    },
-            DateTime      => { :primitive => 'DATE'                                             },
-            Date          => { :primitive => 'DATE'                                             },
-            Time          => { :primitive => 'DATE'                                             },
-            TrueClass     => { :primitive => 'NUMBER',  :precision => 1, :scale => 0            },
-            Types::Object => { :primitive => 'CLOB'                                             },
-            Types::Text   => { :primitive => 'CLOB'                                             },
+            Integer     => { :primitive => 'NUMBER',   :precision => precision, :scale => 0   },
+            String      => { :primitive => 'VARCHAR2', :length => length                      },
+            Class       => { :primitive => 'VARCHAR2', :length => length                      },
+            BigDecimal  => { :primitive => 'NUMBER',   :precision => precision, :scale => nil },
+            Float       => { :primitive => 'BINARY_FLOAT',                                    },
+            DateTime    => { :primitive => 'DATE'                                             },
+            Date        => { :primitive => 'DATE'                                             },
+            Time        => { :primitive => 'DATE'                                             },
+            TrueClass   => { :primitive => 'NUMBER',  :precision => 1, :scale => 0            },
+            Types::Text => { :primitive => 'CLOB'                                             },
           }.freeze
         end
 
@@ -1134,6 +1137,177 @@ module DataMapper
 
       end # module ClassMethods
     end # module PostgresAdapter
+
+   module SqlserverAdapter
+      DEFAULT_CHARACTER_SET = 'utf8'.freeze
+
+      # TODO: document
+      # @api private
+      def self.included(base)
+        base.extend ClassMethods
+      end
+
+      # TODO: document
+      # @api semipublic
+      def storage_exists?(storage_name)
+        select("SELECT name FROM sysobjects WHERE name LIKE ?", storage_name).first == storage_name
+      end
+
+      # TODO: document
+      # @api semipublic
+      def field_exists?(storage_name, field_name)
+        result = select("SELECT c.name FROM sysobjects as o JOIN syscolumns AS c ON o.id = c.id WHERE o.name = #{quote_name(storage_name)} AND c.name LIKE ?", field_name).first
+        result ? result.field == field_name : false
+      end
+
+      module SQL #:nodoc:
+#        private  ## This cannot be private for current migrations
+
+        # TODO: document
+        # @api private
+        def supports_serial?
+          true
+        end
+
+        # TODO: document
+        # @api private
+        def supports_drop_table_if_exists?
+          false
+        end
+
+        # TODO: document
+        # @api private
+        def schema_name
+          # TODO: is there a cleaner way to find out the current DB we are connected to?
+          @options[:path].split('/').last
+        end
+
+        # TODO: update dkubb/dm-more/dm-migrations to use schema_name and remove this
+
+        alias db_name schema_name
+
+        # TODO: document
+        # @api private
+        def create_table_statement(connection, model, properties)
+          statement = <<-SQL.compress_lines
+            CREATE TABLE #{quote_name(model.storage_name(name))}
+            (#{properties.map { |property| property_schema_statement(connection, property_schema_hash(property)) }.join(', ')}
+          SQL
+
+          unless properties.any? { |property| property.serial? }
+            statement << ", PRIMARY KEY(#{properties.key.map { |property| quote_name(property.field) }.join(', ')})"
+          end
+
+          statement << ')'
+          statement
+        end
+
+        # TODO: document
+        # @api private
+        def property_schema_hash(property)
+          schema = super
+
+          if property.primitive == Integer && property.min && property.max
+            schema[:primitive] = integer_column_statement(property.min..property.max)
+          end
+
+          if schema[:primitive] == 'TEXT'
+            schema.delete(:default)
+          end
+
+          schema
+        end
+
+        # TODO: document
+        # @api private
+        def property_schema_statement(connection, schema)
+          if supports_serial? && schema[:serial]
+            statement = quote_name(schema[:name])
+            statement << " #{schema[:primitive]}"
+
+            if schema[:precision] && schema[:scale]
+              statement << "(#{[ :precision, :scale ].map { |key| connection.quote_value(schema[key]) }.join(', ')})"
+            elsif schema[:length]
+              statement << "(#{connection.quote_value(schema[:length])})"
+            end
+
+            statement << ' IDENTITY'
+          else
+            statement = super
+          end
+
+          statement
+        end
+
+        # TODO: document
+        # @api private
+        def character_set
+          @character_set ||= show_variable('character_set_connection') || DEFAULT_CHARACTER_SET
+        end
+
+        # TODO: document
+        # @api private
+        def collation
+          @collation ||= show_variable('collation_connection') || DEFAULT_COLLATION
+        end
+
+        # TODO: document
+        # @api private
+        def show_variable(name)
+          raise "SqlserverAdapter#show_variable: Not implemented"
+        end
+
+        private
+
+        # Return SQL statement for the integer column
+        #
+        # @param [Range] range
+        #   the min/max allowed integers
+        #
+        # @return [String]
+        #   the statement to create the integer column
+        #
+        # @api private
+        def integer_column_statement(range)
+          min = range.first
+          max = range.last
+
+          if    min >= 0      && max < 2**8  then 'TINYINT'
+          elsif min >= -2**15 && max < 2**15 then 'SMALLINT'
+          elsif min >= -2**31 && max < 2**31 then 'INT'
+          elsif min >= -2**63 && max < 2**63 then 'BIGINT'
+          else
+            raise ArgumentError, "min #{min} and max #{max} exceeds supported range"
+          end
+        end
+
+      end # module SQL
+
+      include SQL
+
+      module ClassMethods
+        # Types for Sqlserver databases.
+        #
+        # @return [Hash] types for Sqlserver databases.
+        #
+        # @api private
+        def type_map
+          length    = Property::DEFAULT_LENGTH
+          precision = Property::DEFAULT_PRECISION
+          scale     = Property::DEFAULT_SCALE_BIGDECIMAL
+
+          @type_map ||= super.merge(
+            BigDecimal  => { :primitive => 'FLOAT',    :precision => precision, :scale => nil },
+            DateTime    => { :primitive => 'DATETIME'                                         },
+            Date        => { :primitive => 'SMALLDATETIME'                                    },
+            Time        => { :primitive => 'SMALLDATETIME'                                    },
+            TrueClass   => { :primitive => 'BIT',                                             },
+            Types::Text => { :primitive => 'NVARCHAR', :length => 'max'                       }
+          ).freeze
+        end
+      end # module ClassMethods
+    end # module SqlserverAdapter
+
 
     module Repository
       # Determine whether a particular named storage exists in this repository

@@ -35,7 +35,8 @@ PRIMARY = {
 #  'sqlite3_fs' => "sqlite3://#{temp_db_dir}/primary.db",
   'mysql'      => 'mysql://localhost/dm_core_test',
   'postgres'   => 'postgres://localhost/dm_core_test',
-  'oracle'     => 'oracle://dm_core_test:dm_core_test@localhost/orcl'
+  'oracle'     => 'oracle://dm_core_test:dm_core_test@localhost/orcl',
+  'sqlserver'  => 'sqlserver://dm_core_test:dm_core_test@localhost/dm_core_test;instance=SQLEXPRESS'
 }
 
 ALTERNATE = {
@@ -45,7 +46,8 @@ ALTERNATE = {
 #  'sqlite3_fs' => "sqlite3://#{temp_db_dir}/alternate.db",
   'mysql'      => 'mysql://localhost/dm_core_test2',
   'postgres'   => 'postgres://localhost/dm_core_test2',
-  'oracle'     => 'oracle://dm_core_test2:dm_core_test2@localhost/orcl'
+  'oracle'     => 'oracle://dm_core_test2:dm_core_test2@localhost/orcl',
+  'sqlserver'  => 'sqlserver://dm_core_test:dm_core_test@localhost/dm_core_test2;instance=SQLEXPRESS'
 }
 
 # These environment variables will override the default connection string:
@@ -66,7 +68,7 @@ PRIMARY.only(*adapters).each do |name, default|
 
     # test the connection if possible
     if adapter.respond_to?(:query)
-      name == 'oracle' ? adapter.query('SELECT 1 FROM dual') : adapter.query('SELECT 1')
+      name == 'oracle' ? adapter.select('SELECT 1 FROM dual') : adapter.select('SELECT 1')
     end
 
     ADAPTERS << name

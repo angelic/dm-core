@@ -90,12 +90,9 @@ module DataMapper
         original_attributes[property] || (property.loaded?(self) ? property.get!(self) : nil)
       end
 
-      return unless key.all? {|a| !a.nil?}
+      return unless key.all? { |value| !value.nil? }
 
-      # memoize the key if the Resource is not frozen
-      @key = key unless frozen?
-
-      key
+      @key = key
     end
 
     # Checks if this Resource instance is new
@@ -145,13 +142,17 @@ module DataMapper
     #
     # @api public
     def dirty?
-      if original_attributes.any?
-        true
-      elsif new?
-        model.serial || properties.any? { |property| property.default? }
-      else
-        false
-      end
+      dirty_self? || dirty_parents? || dirty_children?
+    end
+
+    # Checks if this Resource instance is readonly
+    #
+    # @return [Boolean]
+    #   true if the resource cannot be persisted
+    #
+    # @api public
+    def readonly?
+      @readonly == true
     end
 
     # Returns the value of the attribute.
@@ -255,7 +256,7 @@ module DataMapper
             else             property
           end
 
-          attributes[key] = send(name)
+          attributes[key] = __send__(name)
         end
       end
       attributes
@@ -275,7 +276,7 @@ module DataMapper
         case name
           when String, Symbol
             if model.public_method_defined?(setter = "#{name}=")
-              send(setter, value)
+              __send__(setter, value)
             else
               raise ArgumentError, "The attribute '#{name}' is not accessible in #{model}"
             end
@@ -294,7 +295,7 @@ module DataMapper
     def reload
       if saved?
         eager_load(loaded_properties)
-        child_relationships.each { |relationship| relationship.get!(self).reload }
+        child_collections.each { |children| children.reload }
       end
 
       self
@@ -340,6 +341,7 @@ module DataMapper
     # @api public
     chainable do
       def save
+        assert_not_destroyed(:save)
         save_parents && save_self && save_children
       end
     end
@@ -351,6 +353,7 @@ module DataMapper
     #
     # @api public
     def save!
+      assert_not_destroyed(:save!)
       save_parents(false) && save_self(false) && save_children(false)
     end
 
@@ -373,11 +376,12 @@ module DataMapper
     #
     # @api public
     def destroy!
-      if saved? && repository.delete(Collection.new(query, [ self ])) == 1
+      if saved? && !destroyed?
+        repository.delete(collection_for_self)
         @destroyed = true
+        @readonly  = true
         @collection.delete(self) if @collection
         reset
-        freeze
       end
 
       destroyed?
@@ -385,9 +389,9 @@ module DataMapper
 
     # Compares another Resource for equality
     #
-    # Resource is equal to +other+ if they are the same object (identity)
-    # or if they are both of the *same model* and all of their attributes
-    # are equivalent
+    # Resource is equal to +other+ if they are the same object
+    # (identical object_id) or if they are both of the *same model* and
+    # all of their attributes are equivalent
     #
     # @param [Resource] other
     #   the other Resource to compare with
@@ -403,9 +407,8 @@ module DataMapper
 
     # Compares another Resource for equivalency
     #
-    # Resource is equal to +other+ if they are the same object (identity)
-    # or if they are both of the *same base model* and all of their attributes
-    # are equivalent
+    # Resource is equivalent to +other+ if they are the same object
+    # (identical object_id) or all of their attribute are equivalent
     #
     # @param [Resource] other
     #   the other Resource to compare with
@@ -416,8 +419,9 @@ module DataMapper
     # @api public
     def ==(other)
       return true if equal?(other)
-      other.respond_to?(:model)                       &&
-      model.base_model.equal?(other.model.base_model) &&
+      other.respond_to?(:repository) &&
+      other.respond_to?(:key)        &&
+      other.respond_to?(:clean?)     &&
       cmp?(other, :==)
     end
 
@@ -563,25 +567,40 @@ module DataMapper
     #   true if the parents were successfully saved
     #
     # @api private
-    def save_parents(safe = true)
+    def save_parents(safe = true, seen = [])
       parent_relationships.all? do |relationship|
         parent = relationship.get!(self)
-        if parent.dirty? ? parent.save_parents(safe) && parent.save_self(safe) : parent.saved?
+        if seen.include?(parent.object_id) || parent.save_parents(safe, seen << parent.object_id) && parent.save_self(safe)
           relationship.set(self, parent)  # set the FK values
         end
       end
     end
 
-    # Saves the children resources
+    # Checks if the resource has unsaved changes
     #
     # @return [Boolean]
-    #   true if the children were successfully saved
+    #  true if the resource has unsaged changes
     #
     # @api private
-    def save_children(safe = true)
-      child_relationships.all? do |relationship|
-        association = relationship.get!(self)
-        safe ? association.save : association.save!
+    def dirty_self?
+      if original_attributes.any?
+        true
+      elsif new?
+        !model.serial.nil? || properties.any? { |property| property.default? }
+      else
+        false
+      end
+    end
+
+    # Checks if the parents have unsaved changes
+    #
+    # @return [Boolean]
+    #  true if the parents have unsaved changes
+    #
+    # @api private
+    def dirty_parents?
+      parent_resources.any? do |parent|
+        parent.dirty_self? || parent.dirty_parents?
       end
     end
 
@@ -605,8 +624,8 @@ module DataMapper
     #
     # @api private
     def collection
-      return @collection if @collection || new? || frozen?
-      @collection = Collection.new(query, [ self ])
+      return @collection if @collection || new? || readonly?
+      @collection = collection_for_self
     end
 
     protected
@@ -737,6 +756,16 @@ module DataMapper
       Query.new(repository, model, model.key_conditions(repository, key))
     end
 
+    # Return a collection including the current resource only
+    #
+    # @return [Collection]
+    #   a collection containing self
+    #
+    # @api semipublic
+    def collection_for_self
+      Collection.new(query, [ self ])
+    end
+
     # TODO: document
     # @api private
     def parent_relationships
@@ -777,6 +806,18 @@ module DataMapper
       many_to_many + other
     end
 
+    # TODO: document
+    # @api private
+    def parent_resources
+      parent_relationships.map { |relationship| relationship.get!(self) }
+    end
+
+    # TODO: document
+    # @api private
+    def child_collections
+      child_relationships.map { |relationship| relationship.get!(self) }
+    end
+
     # Creates the resource with default values
     #
     # If resource is not dirty or a new (not yet saved),
@@ -796,7 +837,7 @@ module DataMapper
     # @api private
     def _create
       # Can't create a resource that is not dirty and doesn't have serial keys
-      return false if new? && !dirty?
+      return false if new? && clean?
 
       # set defaults for new resource
       properties.each do |property|
@@ -838,7 +879,7 @@ module DataMapper
         # remove from the identity map
         identity_map.delete(key)
 
-        return false unless repository.update(dirty_attributes, Collection.new(query, [ self ])) == 1
+        repository.update(dirty_attributes, collection_for_self)
 
         # remove the cached key in case it is updated
         remove_instance_variable(:@key)
@@ -849,6 +890,28 @@ module DataMapper
 
         true
       end
+    end
+
+    # Saves the children resources
+    #
+    # @return [Boolean]
+    #   true if the children were successfully saved
+    #
+    # @api private
+    def save_children(safe = true)
+      child_collections.all? do |collection|
+        collection.send(safe ? :save : :save!)
+      end
+    end
+
+    # Checks if the children have unsaved changes
+    #
+    # @return [Boolean]
+    #  true if the children have unsaved changes
+    #
+    # @api private
+    def dirty_children?
+      child_collections.any? { |children| children.dirty? }
     end
 
     # Return true if +other+'s is equivalent or equal to +self+'s
@@ -864,7 +927,7 @@ module DataMapper
     # @api private
     def cmp?(other, operator)
       return false unless key.send(operator, other.key)
-      return true if repository.send(operator, other.repository) && !dirty? && !other.dirty?
+      return true if repository.send(operator, other.repository) && clean? && other.clean?
 
       # get all the loaded and non-loaded properties that are not keys,
       # since the key comparison was performed earlier
@@ -888,8 +951,25 @@ module DataMapper
     #
     # @api private
     def assert_update_clean_only(method)
-      if original_attributes.any?
+      if dirty?
         raise UpdateConflictError, "#{model}##{method} cannot be called on a dirty resource"
+      end
+    end
+
+    # Raises an exception if #save is performed on a destroyed resource
+    #
+    # @param [Symbol] method
+    #   the name of the method to use in the exception
+    #
+    # @return [undefined]
+    #
+    # @raise [PersistenceError]
+    #   raise if the resource is destroyed
+    #
+    # @api private
+    def assert_not_destroyed(method)
+      if destroyed?
+        raise PersistenceError, "#{model}##{method} cannot be called on a destroyed resource"
       end
     end
   end # module Resource

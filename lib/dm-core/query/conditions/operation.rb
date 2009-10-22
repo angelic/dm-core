@@ -38,6 +38,7 @@ module DataMapper
       end # class Operation
 
       class AbstractOperation
+        include Extlib::Assertions
         include Enumerable
         extend Equalizer
 
@@ -79,12 +80,13 @@ module DataMapper
         # @api semipublic
         def each
           @operands.each { |*block_args| yield(*block_args) }
+          self
         end
 
         # TODO: document
         # @api semipublic
         def valid?
-          operands.any? && operands.all? do |operand|
+          @operands.any? && @operands.all? do |operand|
             if operand.respond_to?(:valid?)
               operand.valid?
             else
@@ -96,7 +98,23 @@ module DataMapper
         # TODO: document
         # @api semipublic
         def <<(operand)
-          @operands << operand
+          assert_valid_operand(operand)
+          @operands << operand unless operand.nil?
+          self
+        end
+
+        # TODO: document
+        # @api semipublic
+        def merge(operands)
+          operands.each { |operand| assert_valid_operand(operand) }
+          @operands.merge(operands)
+          self
+        end
+
+        # TODO: document
+        # @api semipublic
+        def clear
+          @operands.clear
           self
         end
 
@@ -104,6 +122,12 @@ module DataMapper
         # @api semipublic
         def inspect
           "#<#{self.class} @operands=#{@operands.inspect}>"
+        end
+
+        # TODO: document
+        # @api semipublic
+        def to_s
+          "(#{@operands.to_a.join(" #{slug.upcase} ")})"
         end
 
         # Return a list of operands in predictable order
@@ -121,13 +145,19 @@ module DataMapper
         # TODO: document
         # @api semipublic
         def initialize(*operands)
-          @operands = operands
+          @operands = operands.to_set
         end
 
         # TODO: document
         # @api semipublic
         def initialize_copy(*)
-          @operands = @operands.map { |operand| operand.dup }
+          @operands = @operands.map { |operand| operand.dup }.to_set
+        end
+
+        # TODO: document
+        # @api private
+        def assert_valid_operand(operand)
+          assert_kind_of 'operand', operand, Conditions::AbstractOperation, Conditions::AbstractComparison, Array
         end
       end # class AbstractOperation
 
@@ -136,8 +166,7 @@ module DataMapper
         # @api semipublic
         def <<(operand)
           if operand.kind_of?(self.class)
-            @operands.concat(operand.operands)
-            self
+            merge(operand.operands)
           else
             super
           end
@@ -174,14 +203,28 @@ module DataMapper
         # TODO: document
         # @api semipublic
         def matches?(record)
-          not @operands.first.matches?(record)
+          not operand.matches?(record)
         end
 
         # TODO: document
         # @api semipublic
-        def <<(operand)
-          raise ArgumentError, "#{self.class} cannot have more than one operand" if @operands.size > 0
+        def <<(*)
+          assert_one_operand
           super
+        end
+
+        # TODO: document
+        # @api semipublic
+        def merge(operands)
+          assert_one_operand
+          assert_unary_operator(operands)
+          super
+        end
+
+        # TODO: document
+        # @api semipublic
+        def operand
+          @operands.to_a.first
         end
 
         private
@@ -189,8 +232,24 @@ module DataMapper
         # TODO: document
         # @api semipublic
         def initialize(*operands)
-          raise InvalidOperation, "#{self.class} is a unary operator" if operands.size > 1
+          assert_unary_operator(operands)
           super
+        end
+
+        # TODO: document
+        # @api private
+        def assert_unary_operator(operands)
+          if operands.size > 1
+            raise InvalidOperation, "#{self.class} is a unary operator"
+          end
+        end
+
+        # TODO: document
+        # @api private
+        def assert_one_operand
+          if operand
+            raise ArgumentError, "#{self.class} cannot have more than one operand"
+          end
         end
       end # class NotOperation
 

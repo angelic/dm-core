@@ -11,6 +11,67 @@ module DataMapper
     # You can extend and overwrite these copies without affecting the originals.
     class DataObjectsAdapter < AbstractAdapter
       extend Chainable
+      extend Deprecate
+
+      deprecate :query, :select
+
+      # Retrieve results using an SQL SELECT statement
+      #
+      # @param [String] statement
+      #   the SQL SELECT statement
+      # @param [Array] *bind_values
+      #   optional bind values to merge into the statement
+      #
+      # @return [Array]
+      #   if fields > 1, return an Array of Struct objects
+      #   if fields == 1, return an Array of objects
+      #
+      # @api public
+      def select(statement, *bind_values)
+        with_connection do |connection|
+          reader = connection.create_command(statement).execute_reader(*bind_values)
+          fields = reader.fields
+
+          results = []
+
+          begin
+            if fields.size > 1
+              fields = fields.map { |field| Extlib::Inflection.underscore(field).to_sym }
+              struct = Struct.new(*fields)
+
+              while reader.next!
+                results << struct.new(*reader.values)
+              end
+            else
+              while reader.next!
+                results << reader.values.at(0)
+              end
+            end
+          ensure
+            reader.close
+          end
+
+          results
+        end
+      end
+
+      # Execute non-SELECT SQL query
+      #
+      # @param [String] statement
+      #   the SQL statement
+      # @param [Array] *bind_values
+      #   optional bind values to merge into the statement
+      #
+      # @return [DataObjects::Result]
+      #   result with number of affected rows, and insert id if any
+      #
+      # @api public
+      def execute(statement, *bind_values)
+        with_connection do |connection|
+          command = connection.create_command(statement)
+          command.execute_non_query(*bind_values)
+        end
+      end
 
       # For each model instance in resources, issues an SQL INSERT
       # (or equivalent) statement to create a new record in the data store for
@@ -57,7 +118,7 @@ module DataMapper
           statement = insert_statement(model, properties, serial)
           result    = execute(statement, *bind_values)
 
-          if result.to_i == 1 && serial
+          if result.affected_rows == 1 && serial
             serial.set!(resource, result.insert_id)
           end
         end
@@ -131,7 +192,7 @@ module DataMapper
 
         bind_values.concat(conditions_bind_values)
 
-        execute(statement, *bind_values).to_i
+        execute(statement, *bind_values).affected_rows
       end
 
       # Constructs and executes DELETE statement for given query
@@ -150,47 +211,7 @@ module DataMapper
         # use a subselect to get the rows to be deleted
 
         statement, bind_values = delete_statement(query)
-        execute(statement, *bind_values).to_i
-      end
-
-      # Database-specific method
-      # TODO: document
-      # @api public
-      def execute(statement, *bind_values)
-        with_connection do |connection|
-          command = connection.create_command(statement)
-          command.execute_non_query(*bind_values)
-        end
-      end
-
-      # TODO: document
-      # @api public
-      def query(statement, *bind_values)
-        with_connection do |connection|
-          reader = connection.create_command(statement).execute_reader(*bind_values)
-          fields = reader.fields
-
-          results = []
-
-          begin
-            if fields.size > 1
-              fields = fields.map { |field| Extlib::Inflection.underscore(field).to_sym }
-              struct = Struct.new(*fields)
-
-              while reader.next!
-                results << struct.new(*reader.values)
-              end
-            else
-              while reader.next!
-                results << reader.values.at(0)
-              end
-            end
-          ensure
-            reader.close
-          end
-
-          results
-        end
+        execute(statement, *bind_values).affected_rows
       end
 
       protected
@@ -279,10 +300,10 @@ module DataMapper
 
         # TODO: document
         # @api semipublic
-        def property_to_column_name(property, qualify)
+        def property_to_column_name(property, qualify, qualifier = nil)
           if qualify
             table_name = property.model.storage_name(name)
-            "#{quote_name(table_name)}.#{quote_name(property.field)}"
+            "#{qualifier || quote_name(table_name)}.#{quote_name(property.field)}"
           else
             quote_name(property.field)
           end
@@ -315,7 +336,7 @@ module DataMapper
           qualify  = query.links.any?
           fields   = query.fields
           order_by = query.order
-          group_by = if qualify || query.unique?
+          group_by = if query.unique?
             fields.select { |property| property.kind_of?(Property) }
           end
 
@@ -334,7 +355,7 @@ module DataMapper
         end
 
         # default construction of LIMIT and OFFSET
-        # overriden in Oracle adapter
+        # overriden by some adapters (currently Oracle and SQL Server)
         def add_limit_offset!(statement, limit, offset, bind_values)
           if limit
             statement   << ' LIMIT ?'
@@ -390,7 +411,13 @@ module DataMapper
         #
         # @api private
         def update_statement(properties, query)
-          conditions_statement, bind_values = conditions_statement(query.conditions)
+          # TODO: DRY this up with delete_statement
+          conditions_statement, bind_values = if query.limit || query.offset > 0 || query.links.any?
+            key = query.model.key(name)
+            subquery(query, key, key, false)
+          else
+            conditions_statement(query.conditions)
+          end
 
           statement = "UPDATE #{quote_name(query.model.storage_name(name))}"
           statement << " SET #{properties.map { |property| "#{quote_name(property.field)} = ?" }.join(', ')}"
@@ -405,7 +432,13 @@ module DataMapper
         #
         # @api private
         def delete_statement(query)
-          conditions_statement, bind_values = conditions_statement(query.conditions)
+          # TODO: DRY this up with update_statement
+          conditions_statement, bind_values = if query.limit || query.offset > 0 || query.links.any?
+            key = query.model.key(name)
+            subquery(query, key, key, false)
+          else
+            conditions_statement(query.conditions)
+          end
 
           statement = "DELETE FROM #{quote_name(query.model.storage_name(name))}"
           statement << " WHERE #{conditions_statement}" unless conditions_statement.blank?
@@ -419,8 +452,8 @@ module DataMapper
         #   list of fields as a string
         #
         # @api private
-        def columns_statement(properties, qualify)
-          properties.map { |property| property_to_column_name(property, qualify) }.join(', ')
+        def columns_statement(properties, qualify, qualifier = nil)
+          properties.map { |property| property_to_column_name(property, qualify, qualifier) }.join(', ')
         end
 
         # Constructs joins clause
@@ -450,24 +483,62 @@ module DataMapper
         # @api private
         def conditions_statement(conditions, qualify = false)
           case conditions
-            when Query::Conditions::NotOperation
-              negate_operation(conditions, qualify)
-
-            when Query::Conditions::AbstractOperation
-              # TODO: remove this once conditions can be compressed
-              if conditions.operands.size == 1
-                # factor out operations with a single operand
-                conditions_statement(conditions.operands.first, qualify)
-              else
-                operation_statement(conditions, qualify)
-              end
-
-            when Query::Conditions::AbstractComparison
-              comparison_statement(conditions, qualify)
-
+            when Query::Conditions::NotOperation       then negate_operation(conditions.operand, qualify)
+            when Query::Conditions::AbstractOperation  then operation_statement(conditions, qualify)
+            when Query::Conditions::AbstractComparison then comparison_statement(conditions, qualify)
             when Array
               statement, bind_values = conditions  # handle raw conditions
-              [ "(#{statement})", bind_values ]
+              [ "(#{statement})", bind_values ].compact
+          end
+        end
+
+        # TODO: document
+        # @api private
+        def supports_subquery?(*)
+          true
+        end
+
+        # TODO: document
+        # @api private
+        def subquery(*args)
+          if args.first.repository.name == name && supports_subquery?(*args)
+            subquery_statement(*args)
+          else
+            subquery_execute(*args)
+          end
+        end
+
+        # TODO: document
+        # @api private
+        def subquery_statement(query, source_key, target_key, qualify)
+          query = query.merge(:fields => source_key, :unique => false)
+          query.update(:order => nil) unless query.limit
+
+          statement = if target_key.size == 1
+            property_to_column_name(target_key.first, qualify)
+          else
+            "(#{target_key.map { |property| property_to_column_name(property, qualify) }.join(', ')})"
+          end
+
+          select_statement, bind_values = select_statement(query)
+          statement << " IN (#{select_statement})"
+
+          return statement, bind_values
+        end
+
+        # TODO: document
+        # @api private
+        def subquery_execute(query, source_key, target_key, qualify)
+          query = query.merge(:fields => source_key)
+          query.update(:order => nil)
+
+          sources    = query.model.all(query)
+          conditions = Query.target_conditions(sources, source_key, target_key)
+
+          if conditions.valid?
+            conditions_statement(conditions, qualify)
+          else
+            [ '1 = 0', [] ]
           end
         end
 
@@ -477,9 +548,9 @@ module DataMapper
         #   order clause
         #
         # @api private
-        def order_statement(order, qualify)
+        def order_statement(order, qualify, qualifier = nil)
           statements = order.map do |direction|
-            statement = property_to_column_name(direction.target, qualify)
+            statement = property_to_column_name(direction.target, qualify, qualifier)
             statement << ' DESC' if direction.operator == :desc
             statement
           end
@@ -489,10 +560,10 @@ module DataMapper
 
         # TODO: document
         # @api private
-        def negate_operation(operation, qualify)
+        def negate_operation(operand, qualify)
           @negated = !@negated
           begin
-            conditions_statement(operation.operands.first, qualify)
+            conditions_statement(operand, qualify)
           ensure
             @negated = !@negated
           end
@@ -506,17 +577,16 @@ module DataMapper
 
           operation.each do |operand|
             statement, values = conditions_statement(operand, qualify)
-
-            if operand.respond_to?(:operands) && operand.operands.size > 1
-              statement = "(#{statement})"
-            end
-
             statements << statement
-            bind_values.concat(values)
+            bind_values.concat(values) unless values.nil?
           end
 
           join_with = operation.kind_of?(@negated ? Query::Conditions::OrOperation : Query::Conditions::AndOperation) ? 'AND' : 'OR'
           statement = statements.join(" #{join_with} ")
+
+          if statements.size > 1
+            statement = "(#{statement})"
+          end
 
           return statement, bind_values
         end
@@ -544,10 +614,34 @@ module DataMapper
 
             return "(#{statement})", bind_values
           elsif comparison.relationship?
-            return conditions_statement(comparison.foreign_key_mapping, qualify)
+            # TODO: if the value is a Collection, and it is loaded, and the fields
+            # can satisfy the FK mapping, then do not use a subquery.
+            if comparison.value.respond_to?(:query)
+              relationship = comparison.subject.inverse
+              source_key   = relationship.source_key
+              target_key   = relationship.target_key
+
+              return subquery(comparison.value.query, source_key, target_key, qualify)
+            else
+              return conditions_statement(comparison.foreign_key_mapping, qualify)
+            end
           end
 
-          operator = case comparison
+          operator = comparison_operator(comparison)
+
+          # if operator return value contains ? then it means that it is function call
+          # and it contains placeholder (%s) for property name as well (used in Oracle adapter for regexp operator)
+          if operator.include?('?')
+            return operator % property_to_column_name(comparison.subject, qualify), [ value ]
+          else
+            return "#{property_to_column_name(comparison.subject, qualify)} #{operator} #{value.nil? ? 'NULL' : '?'}", [ value ].compact
+          end
+        end
+
+        def comparison_operator(comparison)
+          value = comparison.value
+
+          case comparison
             when Query::Conditions::EqualToComparison              then @negated ? inequality_operator(comparison.subject, value) : equality_operator(comparison.subject, value)
             when Query::Conditions::InclusionComparison            then @negated ? exclude_operator(comparison.subject, value)    : include_operator(comparison.subject, value)
             when Query::Conditions::RegexpComparison               then @negated ? not_regexp_operator(value) : regexp_operator(value)
@@ -556,14 +650,6 @@ module DataMapper
             when Query::Conditions::LessThanComparison             then @negated ? '>='                       : '<'
             when Query::Conditions::GreaterThanOrEqualToComparison then @negated ? '<'                        : '>='
             when Query::Conditions::LessThanOrEqualToComparison    then @negated ? '>'                        : '<='
-          end
-
-          # if operator return value contains ? then it means that it is function call
-          # and it contains placeholder (%s) for property name as well (used in Oracle adapter for regexp operator)
-          if operator.include?('?')
-            return operator % property_to_column_name(comparison.subject, qualify), [ value ]
-          else
-            return "#{property_to_column_name(comparison.subject, qualify)} #{operator} #{value.nil? ? 'NULL' : '?'}", [ value ].compact
           end
         end
 

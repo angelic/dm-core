@@ -54,7 +54,9 @@ module DataMapper
       else
         Array(source).each do |resource|
           next unless source_key.loaded?(resource)
-          source_values << source_key.get!(resource)
+          source_value = source_key.get!(resource)
+          next if source_value.any? { |value| value.nil? }
+          source_values << source_value
         end
       end
 
@@ -325,23 +327,25 @@ module DataMapper
     def update(other)
       assert_kind_of 'other', other, self.class, Hash
 
-      other_options = if other.kind_of? self.class
-        if self.eql?(other)
-          return self
-        end
+      other_options = if other.kind_of?(self.class)
+        return self if self.eql?(other)
         assert_valid_other(other)
         other.options
       else
+        return self if other.empty?
         other
       end
 
-      unless other_options.empty?
-        options = @options.merge(other_options)
-        if @options[:conditions] and other_options[:conditions]
-          options[:conditions] = @options[:conditions].dup << other_options[:conditions]
-        end
-        initialize(repository, model, options)
+      @options = @options.merge(other_options).freeze
+      assert_valid_options(@options)
+
+      normalize = other_options.only(*OPTIONS - [ :conditions ]).map do |attribute, value|
+        instance_variable_set("@#{attribute}", value.try_dup)
+        attribute
       end
+
+      merge_conditions([ other_options.except(*OPTIONS), other_options[:conditions] ])
+      normalize_options(normalize)
 
       self
     end
@@ -377,20 +381,24 @@ module DataMapper
 
       options = options.dup
 
-      repository = options.delete(:repository) || self.repository
-
-      if repository.kind_of?(Symbol)
-        repository = DataMapper.repository(repository)
-      end
-
       if options.key?(:offset) && (options.key?(:limit) || self.limit)
         offset = options.delete(:offset)
         limit  = options.delete(:limit) || self.limit - offset
 
-        self.class.new(repository, model, @options.merge(options)).slice!(offset, limit)
+        merge(options).slice!(offset, limit)
       else
-        self.class.new(repository, model, @options.merge(options))
+        merge(options)
       end
+    end
+
+    # Clear conditions
+    #
+    # @return [self]
+    #
+    # @api semipublic
+    def clear
+      @conditions = Conditions::Operation.new(:null)
+      self
     end
 
     # Takes an Enumerable of records, and destructively filters it.
@@ -423,9 +431,7 @@ module DataMapper
     # @api semipublic
     def match_records(records)
       return records if conditions.nil?
-      records.select do |record|
-        conditions.matches?(record)
-      end
+      records.select { |record| conditions.matches?(record) }
     end
 
     # Sorts a list of Records by the order
@@ -610,33 +616,18 @@ module DataMapper
 
       @links = @links.dup
 
-      # treat all non-options as conditions
-      @options.except(*OPTIONS).each { |kv| append_condition(*kv) }
-
-      # parse @options[:conditions] differently
-      case conditions = @options[:conditions]
-        when Conditions::AbstractOperation, Conditions::AbstractComparison
-          add_condition(conditions)
-
-        when Hash
-          conditions.each { |kv| append_condition(*kv) }
-
-        when Array
-          statement, *bind_values = *conditions
-          add_condition([ statement, bind_values ])
-          @raw = true
-      end
-
-      normalize_order
-      normalize_fields
-      normalize_links
+      merge_conditions([ @options.except(*OPTIONS), @options[:conditions] ])
+      normalize_options
     end
 
     # Copying contructor, called for Query#dup
     #
     # @api semipublic
-    def initialize_copy(original)
-      initialize(original.repository, original.model, original.options)
+    def initialize_copy(*)
+      @fields     = @fields.dup
+      @links      = @links.dup
+      @conditions = @conditions.dup
+      @order      = @order.try_dup
     end
 
     # Validate the options
@@ -866,9 +857,51 @@ module DataMapper
       end
     end
 
-    # Normalize order elements to Query::Direction instances
+    # Handle all the conditions options provided
     #
-    #   TODO: needs example
+    # @param [Array<Conditions::AbstractOperation, Conditions::AbstractComparison, Hash, Array>]
+    #   a list of conditions
+    #
+    # @return [undefined]
+    #
+    # @api private
+    def merge_conditions(conditions)
+      @conditions = Conditions::Operation.new(:and) << @conditions unless @conditions.nil?
+
+      conditions.compact!
+      conditions.each do |condition|
+        case condition
+          when Conditions::AbstractOperation, Conditions::AbstractComparison
+            add_condition(condition)
+
+          when Hash
+            condition.each { |kv| append_condition(*kv) }
+
+          when Array
+            statement, *bind_values = *condition
+            raw_condition = [ statement ]
+            raw_condition << bind_values if bind_values.size > 0
+            add_condition(raw_condition)
+            @raw = true
+        end
+      end
+    end
+
+    # Normalize options
+    #
+    # @param [Array<Symbol>] options
+    #   the options to normalize
+    #
+    # @return [undefined]
+    #
+    # @api private
+    def normalize_options(options = OPTIONS)
+      (options & [ :order, :fields, :links ]).each do |option|
+        send("normalize_#{option}")
+      end
+    end
+
+    # Normalize order elements to Query::Direction instances
     #
     # @api private
     def normalize_order
@@ -897,8 +930,6 @@ module DataMapper
     end
 
     # Normalize fields to Property instances
-    #
-    #   TODO: needs example
     #
     # @api private
     def normalize_fields
@@ -961,6 +992,7 @@ module DataMapper
           @links << relationship
         end
       end
+
       @links.reverse!
     end
 
@@ -994,24 +1026,38 @@ module DataMapper
     # TODO: document
     # @api private
     def append_property_condition(property, bind_value, operator)
-      bind_value = normalize_bind_value(property, bind_value)
-      negated    = operator == :not
+      negated = operator == :not
 
       if operator == :eql || negated
-        operator = case bind_value
-          when Array, Range, Set, Collection then :in
-          when Regexp                        then :regexp
-          else                                    :eql
-        end
+        operator = equality_operator_for_type(bind_value)
       end
 
       condition = Conditions::Comparison.new(operator, property, bind_value)
 
       if negated
-        condition = Conditions::Operation.new(:not, condition)
+        condition = Conditions::Operation.new(:not) << condition
       end
 
       add_condition(condition)
+    end
+
+    if RUBY_VERSION >= '1.9'
+      def equality_operator_for_type(bind_value)
+        case bind_value
+          when Enumerable then :in
+          when Regexp     then :regexp
+          else                 :eql
+        end
+      end
+    else
+      def equality_operator_for_type(bind_value)
+        case bind_value
+          when String     then :eql
+          when Enumerable then :in
+          when Regexp     then :regexp
+          else                 :eql
+        end
+      end
     end
 
     # TODO: document
@@ -1049,7 +1095,11 @@ module DataMapper
     # TODO: document
     # @api private
     def append_path(path, bind_value, model, operator)
-      @links.unshift(*path.relationships.reverse.map { |relationship| relationship.inverse })
+      path.relationships.each do |relationship|
+        inverse = relationship.inverse
+        @links.unshift(inverse) unless @links.include?(inverse)
+      end
+
       append_condition(path.property, bind_value, path.model, operator)
     end
 
@@ -1064,31 +1114,6 @@ module DataMapper
     def add_condition(condition)
       @conditions = Conditions::Operation.new(:and) if @conditions.nil?
       @conditions << condition
-    end
-
-    # TODO: make this typecast all bind values that do not match the
-    # property primitive
-
-    # TODO: document
-    # @api private
-    def normalize_bind_value(property_or_path, bind_value)
-      # TODO: defer this inside the comparison
-      if bind_value.respond_to?(:call)
-        bind_value = bind_value.call
-      end
-
-      # TODO: bypass this for Collection, once subqueries can be handled by adapters
-      if bind_value.respond_to?(:to_ary)
-        bind_value = bind_value.to_ary
-        bind_value.uniq!
-      end
-
-      # FIXME: causes m:m specs to fail with in-memory adapter
-      # if bind_value.instance_of?(Array) && bind_value.size == 1
-      #   bind_value = bind_value.first
-      # end
-
-      bind_value
     end
 
     # Extract arguments for #slice and #slice! then return offset and limit
@@ -1145,11 +1170,11 @@ module DataMapper
     # TODO: document
     # @api private
     def each_comparison
-      operands = conditions.operands.dup
+      operands = conditions.operands.to_a
 
       while operand = operands.shift
         if operand.respond_to?(:operands)
-          operands.concat(operand.operands)
+          operands.unshift(*operand.operands)
         else
           yield operand
         end
